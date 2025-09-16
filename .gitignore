@@ -1,0 +1,21 @@
+# R specific
+.Rhistory
+.Rdata
+.RData
+.Ruserdata
+.rdb
+.rds
+
+# Output files  
+*.html
+*.pdf
+plots/
+figures/
+
+# Package related
+packrat/lib*/
+renv/library/
+
+# OS generated
+.DS_Store
+Thumbs.db
