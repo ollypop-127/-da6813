@@ -1,0 +1,375 @@
+---
+title: "Bank Marketing Case Study Final Draft"
+author: "Shamir Cardenas"
+date: "2025-09-17"
+output: pdf_document
+---
+
+## Libraries used
+
+```{r}
+library(MASS)
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(corrplot)
+library(car)
+```
+
+
+## when loading the data initially i noticed that the data wasn't being separated correctly. So in order to correct that I had to
+## include (, sep = ";")
+```{r}
+df = read.csv("/Users/shamircardenas/Documents/DA 6813 901 Data Analytics Applications/Bank Marketing Case Study 1/bank-additional-full.csv", sep = ";")
+str(df)
+```
+
+##looking at the dat it seems that I need to change characters to factors in order to run a logistic regression model 
+
+```{r}
+df = df %>% 
+  mutate(across(where(is.character), as.factor))
+str(df)
+```
+## Characters are no Factors
+## checking levels of my target variable
+
+```{r}
+levels(df$y)
+```
+
+#two levels, I want to check how many "yes," and "no," observations there are in my dataset. 
+
+```{r}
+summary(df$y)
+```
+
+
+```{r}
+df %>% 
+  count(y) %>%
+  mutate(percentage = round(n/sum(n)*100, 1)) %>%
+  print()
+```
+## as seen in the summary above, the target variable contains far more "no's" than "yes'" in our dataset. I will address this at a later time but it's important to note now. 
+
+## I want to check for multicollinearity in my numerical data. 
+```{r}
+df_num = dplyr::select_if(df, is.numeric)  
+M = cor(df_num)
+corrplot(M, method = 'number')
+```
+#there appears to be high multicollinearity with the following variables:
+#euribor3m: euribor 3 month rate - daily indicator (numeric) - daily short-term interest rate
+# emp.var.rate: employment variation rate - quarterly indicator (numeric) - measures change in employment quartely 
+#nr.employed: number of employees - quarterly indicator (numeric) - Captures quartely size of the work force 
+#as a group we decided to remove emp.var.rate and nr.employed since they essentially measure the same thing 
+#per instructions we are removing duration variable and the default variable 
+
+```{r}
+df = dplyr::select(df, - emp.var.rate)
+df = dplyr::select(df, - nr.employed)
+df = dplyr::select(df, - duration)
+df = dplyr::select(df, - default)
+```
+
+#The pdays variable is interesting since this is measuring the number of days since last contact
+# looking at the unique values in pdays this seems to measure the days from 1 - 27, with 999 indicating client was not previously contacted.  
+```{r}
+unique(df$pdays)
+```
+
+
+```{r}
+contacted <- df$pdays[df$pdays != 999] #checking max number of never contacted observations
+summary(contacted)
+levels(as.factor(df$pdays))
+```
+# I will also look into putting age variable into buckets and campaign for the number of times a client was contacted
+```{r}
+unique(df$age)
+```
+```{r}
+levels(as.factor(df$campaign))
+summary(as.factor(df$campaign))
+```
+#will create buckets for pdays in order to gather deeper insights into when they best time is to reach out to clients
+#to do this I will create a new variable and then remove the original pdays since we not use the numerical value in our modeling
+```{r}
+df = df %>% 
+  mutate(pdays_bucket = case_when(
+    pdays == 999 ~ "Never Contacted",
+    pdays <= 7 ~ "1 Week",
+    pdays >7 & pdays <= 14 ~ "2 Weeks",  
+    pdays >14 ~ "3 Weeks or more", 
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+df$pdays_bucket = as.factor(df$pdays_bucket) #seeting new column pdays_bucket to be factor
+levels(df$pdays_bucket)
+```
+
+#dropping original pdays column 
+
+```{r}
+df = df %>% select(-pdays)
+str(df)
+```
+
+#creating age bucket, setting as factor and then dropping original age variable 
+```{r}
+df = df %>% 
+  mutate(age_bucket = case_when(
+    age >= 18 & age <= 24 ~ "Young Adult",
+    age >= 25 & age <= 35 ~ "Adult",
+    age >= 36 & age <= 49 ~ "Older Adult",  
+    age >=50 ~ "Senior", 
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+df$age_bucket = as.factor(df$age_bucket) 
+levels(df$age_bucket)
+```
+
+```{r}
+df = df %>% select(-age)
+str(df)
+```
+#creating campaign bucket, setting as factor and then dropping original age variable 
+```{r}
+df = df %>% 
+  mutate(campaign_bucket = case_when(
+    campaign <= 10 ~ "10 or less contacts",
+    campaign >= 11 & campaign <= 20 ~ "11-20 contacts",
+    campaign >= 21  & campaign <= 30 ~ "21-30 contacts",
+    campaign >= 31 & campaign <= 40 ~ "31-40 contacts",
+    campaign >=40 ~ "40+", 
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+df$campaign_bucket = as.factor(df$campaign_bucket) 
+levels(df$campaign_bucket)
+```
+
+```{r}
+df = df %>% select(-campaign)
+str(df)
+```
+
+
+#will now check for any missing values
+
+```{r}
+
+df = subset(df, !is.na(df$previous))
+df = subset(df, !is.na(df$cons.price.idx))
+df = subset(df, !is.na(df$cons.conf.idx))
+df = subset(df, !is.na(df$euribor3m))
+
+df = subset(df, !is.nan(df$pdays_bucket))
+df = subset(df, !is.nan(df$age_bucket))
+df = subset(df, !is.nan(df$campaign_bucket))
+df = subset(df, !is.nan(df$job))
+df = subset(df, !is.nan(df$marital))
+df = subset(df, !is.nan(df$education))
+df = subset(df, !is.nan(df$housing))
+df = subset(df, !is.nan(df$loan))
+df = subset(df, !is.nan(df$contact))
+df = subset(df, !is.nan(df$month))
+df = subset(df, !is.nan(df$day_of_week))
+df = subset(df, !is.nan(df$poutcome))
+df = subset(df, !is.nan(df$y))
+```
+
+#there didnt appear to be any missing observations in dataset
+
+
+#splitting training/test 
+```{r}
+set.seed(42)
+tr_ind = sample(nrow(df), 0.8*nrow(df), replace = F)
+dftrain = df[tr_ind,]
+dftest = df[-tr_ind]
+```
+
+#building logistic model
+```{r}
+m1.log = glm(y ~., data = dftrain, family = binomial)
+summary(m1.log)
+```
+
+#there seems to be some N/As in my initial run in the loan variable which tracks whether or not client has a personal loan. Looks like the error is being specifically caused by the unkown observations. I know that housing variable, which tracks whether or not client has a housing loan also has "unknown," observations, so first I will check how many unknowns are in the dataset and then decide whether to remove those or not. 
+
+```{r}
+summary(df$loan)
+```
+
+```{r}
+summary(df$housing)
+```
+
+#Interesting, that there is exaclty 990 "unknown," observations in both housing and loan variables. I will remove these observations from my dataset. 
+
+#removing from loan variable first 
+```{r}
+df = df %>% 
+  filter(loan != "unknown")
+df$loan = droplevels(df$loan)
+levels(df$loan)
+table(df$loan)
+```
+#removing from housing variable unkown observations
+```{r}
+df = df %>% 
+  filter(housing != "unknown")
+df$housing = droplevels(df$housing)
+levels(df$housing)
+table(df$housing)
+```
+
+#now will rebuild my training split 
+```{r}
+set.seed(42)
+tr_ind = sample(nrow(df), 0.8*nrow(df), replace = F)
+dftrain = df[tr_ind,]
+dftest = df[-tr_ind,]
+```
+
+#running logistic model again on training data
+```{r}
+m1.log2 = glm(y ~., data = dftrain, family = binomial)
+summary(m1.log2)
+```
+#Based on my initial logistical regression model, the following variables are shown to be statistically significant predictors of whether or not a client will subscribe to a term deposit.
+#jobblue-collar  
+#jobretired  
+#contacttelephone
+#monthjul 
+#monthmar 
+#monthmay
+#day_of_weekmon   
+#day_of_weekwed  
+#poutcomenonexistent             
+#poutcomesuccess               
+#cons.price.idx               
+#cons.conf.idx 
+#euribor3m
+#pdays_bucketNever Contacted   
+#age_bucketOlder Adult          
+
+#using VIF funtion to check for multicollinearity 
+
+```{r}
+vif(m1.log2)
+```
+#making predictions for logistic model
+```{r}
+predprob = predict.glm(m1.log2, newdata = dftest, type = "response")
+predclass_log = ifelse(predprob >=.08, "yes", "no" )
+caret::confusionMatrix(as.factor(predclass_log), as.factor(dftest$y), positive = "yes")
+```
+#to account for the imbalanced dataset I set my decision threshold to .08 since almost 90% of the dataset consists of observations that resulted in client saying "no" to making a term deposit. At this threshold I achieved my best results listed below.
+
+# Accuracy : 0.7254
+#Sensitivity : 0.70455         
+#Specificity : 0.72808  
+
+#I will now to a backwards stepwise to see if this will improve my model
+```{r}
+m2.log = step(m1.log2, direction = "backward")
+summary(m2.log)
+```
+
+#The variables listed below were statistically significant using backwards stepwise. 
+#jobblue-collar                 -0.250252   0.062937  -3.976 7.00e-05 ***
+#jobservices                    -0.201212   0.081306  -2.475 0.013333 *  
+#jobtechnician                  -0.124345   0.062965  -1.975 0.048289 *  
+#contacttelephone               -0.522062   0.068357  -7.637 2.22e-14 ***
+#monthjul                        0.237504   0.093758   2.533 0.011304 * 
+#monthmar                        1.098941   0.124587   8.821  < 2e-16 ***
+#monthmay                       -0.626189   0.074377  -8.419  < 2e-16 ***
+#day_of_weekmon                 -0.230556   0.065324  -3.529 0.000416 ***
+#day_of_weekwed                  0.164820   0.063883   2.580 0.009879 ** 
+#poutcomenonexistent             0.538565   0.064541   8.345  < 2e-16 ***
+#poutcomesuccess                 0.869021   0.224059   3.879 0.000105 ***
+#cons.price.idx                  0.467725   0.047682   9.809  < 2e-16 ***
+#cons.conf.idx                   0.045452   0.005218   8.710  < 2e-16 ***
+#euribor3m                      -0.557939   0.017765 -31.407  < 2e-16 ***
+#pdays_bucketNever Contacted    -1.024328   0.232740  -4.401 1.08e-05 ***
+#age_bucketOlder Adult          -0.164180   0.047902  -3.427 0.000609 ***
+
+#checking for multicollinearity 
+```{r}
+vif(m2.log)
+```
+#No multicollinearity 
+
+#Will check and see what features are being utilized in my model and then will filter dataset and run logistic regression again. 
+
+```{r}
+all.vars(formula(m2.log))
+```
+
+
+```{r}
+df2 = df %>% 
+  select("y","job","contact","month","day_of_week", "poutcome", "cons.price.idx","cons.conf.idx", "euribor3m","pdays_bucket", "age_bucket", "campaign_bucket")
+
+```
+
+#splitting new dataset
+```{r}
+set.seed(42)
+tr_ind2 = sample(nrow(df2), 0.8*nrow(df2), replace = F)
+dftrain2 = df2[tr_ind2,]
+dftest2 = df2[-tr_ind2,]
+```
+
+```{r}
+predprob2 = predict.glm(m2.log, newdata = dftest2, type = "response")
+predclass_log2 = ifelse(predprob >=.078, "yes", "no" )
+caret::confusionMatrix(as.factor(predclass_log2), as.factor(dftest2$y), positive = "yes")
+```
+
+#Backwards stepwise did not help improve overall accuracy or sensitivity. However, when adjusting decision threshold to .078 accuracy dropped from .7254 to 0.7164 but sensitivity which predicts 1 (yes) increased slightly from 0.70455 to 0.71104. 
+
+#will now do a stepwise that is both forward and backward. 
+```{r}
+m3.log = step(m1.log2, direction = "both")
+summary(m3.log)
+```
+
+```{r}
+vif(m3.log)
+```
+
+
+```{r}
+all.vars(formula(m3.log))
+```
+
+```{r}
+df3 = df %>% 
+  select("y","job","contact","month","day_of_week", "poutcome", "cons.price.idx","cons.conf.idx", "euribor3m","pdays_bucket", "age_bucket", "campaign_bucket")
+```
+
+#ended up with the same variables
+```{r}
+set.seed(42)
+tr_ind3 = sample(nrow(df3), 0.8*nrow(df3), replace = F)
+dftrain3 = df3[tr_ind2,]
+dftest3 = df3[-tr_ind2,]
+```
+
+```{r}
+predprob3 = predict.glm(m3.log, newdata = dftest3, type = "response")
+predclass_log3 = ifelse(predprob >=.078, "yes", "no" )
+caret::confusionMatrix(as.factor(predclass_log3), as.factor(dftest3$y), positive = "yes")
+```
+#same results.  I'm honeslty lost at what else we could do to improve accuracy and sensitivity 
