@@ -1,0 +1,368 @@
+---
+title: "Bank Marketing Case Study LDA"
+format: html
+editor: source
+---
+
+
+## Libraries used
+
+```{r}
+library(MASS)
+library(caret)
+library(readr)
+library(ggplot2)
+library(tidyverse)
+library(corrplot)
+library(car)
+```
+
+
+## when loading the data initially i noticed that the data wasn't being separated correctly. So in order to correct that I had to
+## include (, sep = ";")
+```{r}
+df = read.csv("bank-additional-full.csv", sep=";")
+str(df)
+```
+
+##looking at the dat it seems that I need to change characters to factors in order to run a logistic regression model 
+
+```{r}
+df = df %>% 
+  mutate(across(where(is.character), as.factor))
+str(df)
+```
+## Characters are no Factors
+## checking levels of my target variable
+
+```{r}
+levels(df$y)
+```
+
+##two levels, I want to check how many "yes," and "no," observations there are in my dataset. 
+
+```{r}
+summary(df$y)
+```
+
+
+```{r}
+df %>% 
+  count(y) %>%
+  mutate(percentage = round(n/sum(n)*100, 1)) %>%
+  print()
+```
+## as seen in the summary above, the target variable contains far more "no's" than "yes'" in our dataset. I will address this at a later time but it's important to note now. 
+
+## I want to check for multicollinearity in my numerical data. 
+```{r}
+df_num = dplyr::select_if(df, is.numeric)  
+M = cor(df_num)
+corrplot(M, method = 'number')
+```
+##there appears to be high multicollinearity with the following variables:
+##euribor3m: euribor 3 month rate - daily indicator (numeric) - daily short-term interest rate
+## emp.var.rate: employment variation rate - quarterly indicator (numeric) - measures change in employment quartely 
+##nr.employed: number of employees - quarterly indicator (numeric) - Captures quartely size of the work force 
+##as a group we decided to remove emp.var.rate and nr.employed since they essentially measure the same thing 
+##per instructions we are removing duration variable and the default variable 
+
+```{r}
+df <- subset(df, select = -emp.var.rate)
+df <- subset(df, select = -nr.employed)
+df <- subset(df, select = -duration)
+df <- subset(df, select = -default)
+
+```
+
+## The pdays variable is interesting since this is measuring the number of days since last contact
+## looking at the unique values in pdays this seems to measure the days from 1 - 27, with 999 indicating client was not previously contacted.  
+```{r}
+unique(df$pdays)
+```
+
+
+```{r}
+contacted <- df$pdays[df$pdays != 999] #checking max number of never contacted observations
+summary(contacted)
+levels(as.factor(df$pdays))
+```
+## I will also look into putting age variable into buckets and campaign for the number of times a client was contacted
+```{r}
+unique(df$age)
+```
+```{r}
+levels(as.factor(df$campaign))
+summary(as.factor(df$campaign))
+```
+## will create buckets for pdays in order to gather deeper insights into when they best time is to reach out to clients
+## to do this I will create a new variable and then remove the original pdays since we not use the numerical value in our modeling
+```{r}
+df = df %>% 
+  mutate(pdays_bucket = case_when(
+    pdays == 999 ~ "Never Contacted",
+    pdays <= 7 ~ "1 Week",
+    pdays >7 & pdays <= 14 ~ "2 Weeks",  
+    pdays >14 ~ "3 Weeks or more", 
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+df$pdays_bucket = as.factor(df$pdays_bucket) #seeting new column pdays_bucket to be factor
+levels(df$pdays_bucket)
+```
+
+## dropping original pdays column 
+
+```{r}
+df <- subset(df, select = -pdays)
+str(df)
+```
+
+## creating age bucket, setting as factor and then dropping original age variable 
+```{r}
+df = df %>% 
+  mutate(age_bucket = case_when(
+    age >= 18 & age <= 24 ~ "Young Adult",
+    age >= 25 & age <= 35 ~ "Adult",
+    age >= 36 & age <= 49 ~ "Older Adult",  
+    age >=50 ~ "Senior", 
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+df$age_bucket = as.factor(df$age_bucket) 
+levels(df$age_bucket)
+```
+
+```{r}
+df <- subset(df, select = -age)
+str(df)
+```
+## creating campaign bucket, setting as factor and then dropping original age variable 
+```{r}
+df = df %>% 
+  mutate(campaign_bucket = case_when(
+    campaign <= 10 ~ "10 or less contacts",
+    campaign >= 11 & campaign <= 20 ~ "11-20 contacts",
+    campaign >= 21  & campaign <= 30 ~ "21-30 contacts",
+    campaign >= 31 & campaign <= 40 ~ "31-40 contacts",
+    campaign >=40 ~ "40+", 
+    TRUE ~ "Other"
+  ))
+```
+
+```{r}
+df$campaign_bucket = as.factor(df$campaign_bucket) 
+levels(df$campaign_bucket)
+```
+
+```{r}
+df <- subset(df, select = -campaign)
+str(df)
+```
+
+
+##will now check for any missing values
+
+```{r}
+
+df = subset(df, !is.na(df$previous))
+df = subset(df, !is.na(df$cons.price.idx))
+df = subset(df, !is.na(df$cons.conf.idx))
+df = subset(df, !is.na(df$euribor3m))
+
+df = subset(df, !is.nan(df$pdays_bucket))
+df = subset(df, !is.nan(df$age_bucket))
+df = subset(df, !is.nan(df$campaign_bucket))
+df = subset(df, !is.nan(df$job))
+df = subset(df, !is.nan(df$marital))
+df = subset(df, !is.nan(df$education))
+df = subset(df, !is.nan(df$housing))
+df = subset(df, !is.nan(df$loan))
+df = subset(df, !is.nan(df$contact))
+df = subset(df, !is.nan(df$month))
+df = subset(df, !is.nan(df$day_of_week))
+df = subset(df, !is.nan(df$poutcome))
+df = subset(df, !is.nan(df$y))
+```
+
+##there didnt appear to be any missing observations in dataset
+
+
+
+
+##there seems to be some N/As in my initial run in the loan variable which tracks whether or not client has a personal loan. Looks like the error is being specifically caused by the unkown observations. I know that housing variable, which tracks whether or not client has a housing loan also has "unknown," observations, so first I will check how many unknowns are in the dataset and then decide whether to remove those or not. 
+
+```{r}
+summary(df$loan)
+```
+
+```{r}
+summary(df$housing)
+```
+
+##Interesting, that there is exaclty 990 "unknown," observations in both housing and loan variables. I will remove these observations from my dataset. 
+
+##removing from loan variable first 
+```{r}
+df = df %>% 
+  filter(loan != "unknown")
+df$loan = droplevels(df$loan)
+levels(df$loan)
+table(df$loan)
+```
+##removing from housing variable unkown observations
+```{r}
+df = df %>% 
+  filter(housing != "unknown")
+df$housing = droplevels(df$housing)
+levels(df$housing)
+table(df$housing)
+```
+```{r}
+summary(df)
+```
+
+
+# LDA Modeling part
+
+#### Accuracy 0.5758, sensitivity 0.8061, specificity 0.5465
+#### I tuned the model to have higher sensitivity to capture more yes's. the case study didn't mention cost as a constraint, so I tuned the model to contact a bunch of people which will create a lot of false positives, but at the end of the day we capture more yes's so more of the actual subscribers are in my target group which helps to identify the people more likely to subscribe so we can further target such groups
+
+```{r}
+# Use df as input for LDA
+train_df <- df   
+
+
+# class distribution 70% no, 30% yes used to try and improve accuracy
+# this works by weighing the classes and basically forcing the model to pay more attention to the yes's, basically tells the model there are more yes's than there actually is
+# this will increase sensitivity and decrease specificity
+lda_model <- lda(y ~ ., data = train_df, prior = c(0.7, 0.3))
+
+
+# generate predictions on the training data
+# predict() gives class predictions and posterior probabilities
+lda_pred <- predict(lda_model, newdata = train_df)
+
+# extract the probability of being in class "yes"
+posterior_probs <- lda_pred$posterior[, "yes"]
+
+# custom threshold used to convert probabilities into class labels
+# lowered it to to increase sensitivity and predict more yes's (default is 0.5)
+# very low due to the imbalance and the need to sacrifice accuracy in order to capture more yes's
+# this will increase sensitivity and decrease specificity
+# adjusting the prior and the threshold are basically what i'm doing to tune the model and try to predict more yes
+threshold <- 0.08
+lda_class <- ifelse(posterior_probs > threshold, "yes", "no")
+
+# evaluate the models performance using a confusion matrix
+# positive = "yes" makes yes the focus for sensitivity/specificity
+confusionMatrix(as.factor(lda_class), train_df$y, positive = "yes")
+
+```
+## using VIF funtion to check for multicollinearity 
+
+#### previous         6.064362  1        2.462593
+#### poutcome        49.809297  2        2.656609
+#### cons.price.idx   4.630978  1        2.151971
+#### euribor3m        5.131554  1        2.265293
+
+### The above had the highest multicollinearity but it's still fairly low so it shouldn't be an issue
+### euribor3m and cons.price.idx are both economic indicators so it's to be expected
+
+```{r}
+# convert 'y' to numeric (0 or 1) because VIF requires a numeric response
+lm_model <- lm(as.numeric(y) ~ ., data = df)
+
+# values > 5–10 indicate high correlation between predictors
+vif(lm_model)
+```
+
+
+
+```{r}
+# scaling used to display the significant variables in the model
+# larger values indicate more influence on the model
+# positive indicate customer likely to say yes, negative is likely to say no
+lda_model$scaling
+```
+### Most influential variables
+
+#### monthmar → 1.605
+#### poutcomesuccess → 1.082
+#### educationilliterate → 0.746
+#### cons.price.idx → 0.793
+#### pdays_bucketNever Contacted → -1.817
+#### age_bucketOther → -2.501
+#### euribor3m → -0.581
+#### monthmay → -0.559
+
+
+
+## surprising variables
+
+
+#### educationilliterate  - why are illiterate people more likely to subscribe?
+
+#### pdays_bucketNever Contacted → -1.817  - I would think that if they were never contacted they would be more likely to subscribe, but maybe being contacted multiple times wears them down
+
+#### monthmar → 1.605what is going on in march that causes more people to subscribe then
+
+
+
+
+## Expected lift using the LDA compared to random targeting: 3.1
+## This means 3.1 times more likely to get a subscriber using the model than if you randomly targeted people
+
+```{r}
+# determine how many rows correspond to the top 20% of predicted probabilities
+top_n <- round(0.2 * length(posterior_probs))  
+
+# get the indices of the customers with the highest posterior probabilities
+top_indices <- order(-posterior_probs)[1:top_n]  
+
+# extract the actual subscription outcomes (yes or no) for these top 20% customers
+top20_y <- df$y[top_indices]  
+
+# Calculate lift:
+# lift = (conversion rate among top 20% predicted customers) ÷ (overall conversion rate if contacting customers randomly)
+# using 20% because i want to show how much better the model does than random if you want to target the top 20%
+lift <- mean(top20_y == "yes") / mean(df$y == "yes")  
+
+
+lift
+```
+
+
+## see the top 20% of customers to contact
+  
+```{r}
+
+# utilizes variables from the previous lift calculation to get the customer profiles of the top 20% we should contact
+
+# subset the top 20%
+top_customers <- df[top_indices, ] %>%
+  mutate(pred_prob = posterior_probs[top_indices])
+
+# aggregate based on these demographics to see common characteristics
+top_customers_agg <- top_customers %>%
+  group_by(age_bucket, job, education) %>%
+  summarise(
+    count = n(),
+    avg_prob = mean(pred_prob),
+    actual_subs_rate = mean(y == "yes")
+  ) %>%
+  arrange(desc(avg_prob))
+
+top_customers_agg
+```
+
+### avg probability should match actual subscription rate to determine who we should really be contacting, sample size matters as well, we want to make sure the predictions have been proven
+
+### example: Senior	retired	basic.4y	331	0.7710496	0.48942598, large sample size, the model did overestimate the prediction probability because actual subscriptions were 0.48 but that's still better than random so it could still be a good group to target
+
+
+
