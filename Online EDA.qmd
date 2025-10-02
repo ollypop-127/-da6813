@@ -1,0 +1,828 @@
+---
+title: "Case study 2"
+format: html
+editor: source
+---
+
+
+```{r}
+library(MASS)
+library(caret)
+library(readr)
+library(readxl)
+library(ggplot2)
+library(tidyverse)
+library(corrplot)
+library(car)
+library(sqldf)
+library(lubridate)
+library(dplyr)
+library(scales)
+library(cluster)
+library(gridExtra)
+```
+
+# EDA
+
+```{r}
+df <- read_excel("online_retail.xlsx")
+```
+
+```{r}
+summary(df)
+```
+
+```{r}
+str(df)
+```
+Categorical Variables:
+Invoice
+StockCode
+Description
+Country
+InvoiceDate
+
+Numerical Variables:
+Quantity
+Price
+Customer ID
+
+Thoughts:
+Maybe certain times are better to increase prices? Customers are less price sensitive during holidays etc. Also important to make sure not to run out of products.
+
+
+if you buy christmas lights do you also buy something else - market basket 
+increase certain products during certain times 
+
+```{r}
+# check for NA's
+# Description NA's... those products still matter but what are they
+colSums(is.na(df))
+```
+Customer ID is missing a ton of values, does that mean those aren't sales? the quantity still changes so there were sales that existed but for some reason there aren't Customer ID's, not sure what that indicates
+
+# Data Cleaning
+
+## Important: Stock code M will need to be removed when modeling stock
+M is manual override. For some reason, the product information was lost but the sales, quantity, and customer info was retained for that sale. Keeping M in for the meantime to accurately track sales and customer spending.
+
+df <- df |> 
+  filter(!StockCode %in% c("M"))
+
+
+```{r}
+# trim spaces in character columns
+df <- df |> 
+  mutate(across(where(is.character), trimws))
+
+# Remove completely empty strings
+df <- df |> 
+  mutate(across(where(is.character), ~na_if(., "")))
+```
+
+
+```{r}
+# make a new column Revenue as the product of price and quantity
+df <- df |> 
+  mutate(Revenue = Price * Quantity)
+
+# convert InvoiceDate to Date format
+df$InvoiceDate <- as.Date(df$InvoiceDate)
+```
+
+
+```{r}
+head(df)
+```
+
+```{r}
+# Fill NAs in Description with the most common description for each StockCode
+df <- df |> 
+  group_by(StockCode) |> 
+  mutate(
+    Description = ifelse(is.na(Description), 
+                        first(Description[!is.na(Description)]), 
+                        Description)
+  ) |> 
+  ungroup()
+
+# check null results now
+df |> 
+  filter(is.na(Description)) |> 
+  nrow()
+colSums(is.na(df))
+```
+```{r}
+# See which StockCodes still have null descriptions
+null_by_stockcode <- df |> 
+  filter(is.na(Description)) |> 
+  group_by(StockCode) |> 
+  summarise(
+    Count = n(),
+    Sample_Invoice = first(Invoice),
+    .groups = 'drop'
+  ) |> 
+  arrange(desc(Count))
+
+print(null_by_stockcode)
+```
+
+
+```{r}
+# Remove POST and DOT, postage isn't a product they actually sell, they just charge for it
+
+df <- df |> 
+  filter(!StockCode %in% c("POST", "DOT"))
+
+# Verify they're gone
+df |> 
+  filter(StockCode %in% c("POST", "DOT")) |> 
+  nrow()  
+
+```
+
+
+```{r}
+# negative quantities I don't want to necessarily completely delete since they may be useful
+# Separate returns/adjustments from regular sales
+# df will be the sales df 
+returns_df <- df |> 
+  filter(Quantity < 0)
+
+df <- df |> 
+  filter(Quantity > 0)
+
+```
+
+```{r}
+# View all rows with negative quantities
+
+# See how many there are
+nrow(returns_df)
+
+# View them
+head(returns_df)
+```
+
+```{r}
+# looks like for some of them it's the same customer doing the negative quantity
+returns_df |> 
+  select(`Customer ID`, Invoice, StockCode, Description, Quantity, Price, Country, InvoiceDate)
+
+```
+
+
+```{r}
+# rows with 0 price, don't want to completely get rid of them in case we need them later
+# the 0 price rows also have some with no description, but they do have quantities
+# Save zero-price rows to separate dataset
+zero_price_df <- df |> 
+  filter(Price == 0)
+
+# Remove zero-price rows from df
+df <- df |> 
+  filter(Price > 0)
+
+# Verify
+cat("Zero price dataset:", nrow(zero_price_df), "rows\n")
+cat("Main dataset:", nrow(df), "rows\n")
+cat("Total:", nrow(zero_price_df) + nrow(df), "rows\n")
+```
+```{r}
+# View all rows with negative prices
+# Description says adjust bad debt, maybe some kind of charge back
+# They have a stock code of just B
+
+# See how many there are
+nrow(zero_price_df)
+
+# View them
+head(zero_price_df)
+```
+
+
+```{r}
+# Remove B stock code
+df <- df |> 
+  filter(!StockCode %in% c("B"))
+```
+
+
+
+# More EDA
+
+```{r}
+# See the earliest and latest dates
+# Spans about a year
+range(df$InvoiceDate, na.rm = TRUE)
+```
+
+```{r}
+# Unique Products
+unique_products <- n_distinct(df$StockCode)
+cat("Unique Products:", unique_products, "\n")
+
+# Unique Customers
+unique_customers <- n_distinct(df$`Customer ID`, na.rm = TRUE)
+cat("Unique Customers:", unique_customers, "\n")
+
+# Unique Countries
+unique_countries <- n_distinct(df$Country)
+cat("Unique Countries:", unique_countries, "\n")
+
+# Unique Transactions
+unique_transactions <- n_distinct(df$Invoice)
+cat("Unique Transactions:", unique_transactions, "\n")
+```
+```{r}
+# Monthly, weekly transactions
+
+# Monthly transaction counts
+monthly_transactions <- df |> 
+  mutate(YearMonth = floor_date(InvoiceDate, "month")) |> 
+  group_by(YearMonth) |> 
+  summarise(
+    Transactions = n_distinct(Invoice),
+    Customers = n_distinct(`Customer ID`, na.rm = TRUE),
+    Revenue = sum(Quantity * Price, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+print(monthly_transactions)
+
+# Average per month
+cat("\nAverage Transactions per Month:", 
+    round(mean(monthly_transactions$Transactions), 1), "\n")
+
+# Weekly transaction counts
+weekly_transactions <- df |> 
+  mutate(Week = floor_date(InvoiceDate, "week")) |> 
+  group_by(Week) |> 
+  summarise(
+    Transactions = n_distinct(Invoice),
+    Customers = n_distinct(`Customer ID`, na.rm = TRUE),
+    Revenue = sum(Quantity * Price, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+print(head(weekly_transactions))
+
+# Average per week
+cat("Average Transactions per Week:", 
+    round(mean(weekly_transactions$Transactions), 1), "\n")
+```
+
+```{r}
+# Monthly weekly Revenue
+
+# Monthly revenue
+monthly_revenue <- df |> 
+  mutate(YearMonth = floor_date(InvoiceDate, "month")) |> 
+  group_by(YearMonth) |> 
+  summarise(
+    Transactions = n_distinct(Invoice),
+    Customers = n_distinct(`Customer ID`, na.rm = TRUE),
+    Total_Revenue = sum(Revenue, na.rm = TRUE),
+    Avg_Revenue_Per_Transaction = round(sum(Revenue, na.rm = TRUE) / n_distinct(Invoice), 2),
+    .groups = 'drop'
+  )
+
+print(monthly_revenue)
+
+# Average per month
+cat("\nAverage Revenue per Month: £", 
+    format(round(mean(monthly_revenue$Total_Revenue), 0), big.mark = ","), "\n")
+
+# Weekly revenue
+weekly_revenue <- df |> 
+  mutate(Week = floor_date(InvoiceDate, "week")) |> 
+  group_by(Week) |> 
+  summarise(
+    Transactions = n_distinct(Invoice),
+    Customers = n_distinct(`Customer ID`, na.rm = TRUE),
+    Total_Revenue = sum(Revenue, na.rm = TRUE),
+    Avg_Revenue_Per_Transaction = round(sum(Revenue, na.rm = TRUE) / n_distinct(Invoice), 2),
+    .groups = 'drop'
+  )
+
+print(head(weekly_revenue, 20))
+
+# Average per week
+cat("Average Revenue per Week: £", 
+    format(round(mean(weekly_revenue$Total_Revenue), 0), big.mark = ","), "\n")
+```
+
+
+
+# Which countries contribute the most to Sales growth?
+UK, Ireland, Netherlands, Germany, France
+
+```{r}
+# revenue by country
+# Most of the distribution is in the UK and the rest of Europe
+df |> 
+  group_by(Country) |> 
+  summarise(TotalRevenue = sum(Revenue, na.rm = TRUE)) |> 
+  arrange(desc(TotalRevenue))
+```
+
+```{r}
+df |> 
+  group_by(Country) |> 
+  summarise(TotalRevenue = sum(Revenue, na.rm = TRUE)) |> 
+  arrange(desc(TotalRevenue)) |>
+  head(5) |>  # top 5
+  ggplot(aes(x = reorder(Country, TotalRevenue), y = TotalRevenue)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 5 Countries by Total Revenue",
+       x = "Country",
+       y = "Total Revenue") +
+  theme_minimal()
+```
+
+# What are the top-selling products?
+
+```{r}
+# top selling products
+# M is manual, you can't track what M is
+# 22423, 85123A, M
+df |> 
+  group_by(StockCode) |> 
+  summarise(TotalRevenue = sum(Revenue, na.rm = TRUE)) |> 
+  arrange(desc(TotalRevenue))
+```
+
+
+```{r}
+df |> 
+  filter(!is.na(Description)) |>  # Remove rows with NA descriptions
+  group_by(StockCode) |> 
+  summarise(
+    TotalRevenue = sum(Revenue, na.rm = TRUE),
+    Description = first(Description)  # Get first description for each StockCode
+  ) |> 
+  arrange(desc(TotalRevenue)) |>
+  head(5) |>
+  ggplot(aes(x = reorder(Description, TotalRevenue), y = TotalRevenue)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 5 Products by Total Revenue",
+       x = "Product Description",
+       y = "Total Revenue") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 9))
+```
+
+
+```{r}
+# revenue grouped by customer
+# most of the revenue doesn't have a customer ID, who is buying all of this then
+# Highest buying customers, 18102, 14646
+df |> 
+  group_by(`Customer ID`) |> 
+  summarise(TotalRevenue = sum(Revenue, na.rm = TRUE)) |> 
+  arrange(desc(TotalRevenue))
+```
+
+
+
+# Time Series
+
+```{r}
+# Create daily sales summary
+daily_sales <- df |> 
+  group_by(InvoiceDate) |> 
+  summarise(
+    Num_Transactions = n_distinct(Invoice),
+    Num_Items_Sold = sum(Quantity, na.rm = TRUE),
+    Total_Revenue = sum(Revenue, na.rm = TRUE),
+    Num_Customers = n_distinct(`Customer ID`, na.rm = TRUE),
+    .groups = 'drop'
+  ) |> 
+  arrange(InvoiceDate)
+
+head(daily_sales)
+summary(daily_sales)
+```
+
+
+```{r}
+# Create monthly sales summary
+monthly_sales <- df |> 
+  mutate(
+    Year = year(InvoiceDate),
+    Month = month(InvoiceDate),
+    YearMonth = floor_date(InvoiceDate, "month")  # First day of each month
+  ) |> 
+  group_by(YearMonth) |> 
+  summarise(
+    Num_Transactions = n_distinct(Invoice),
+    Num_Items_Sold = sum(Quantity, na.rm = TRUE),
+    Total_Revenue = sum(Revenue, na.rm = TRUE),
+    Num_Customers = n_distinct(`Customer ID`, na.rm = TRUE),
+    .groups = 'drop'
+  ) |> 
+  arrange(YearMonth)
+
+# View monthly data
+print(monthly_sales)
+
+# Plot monthly sales
+ggplot(monthly_sales, aes(x = YearMonth, y = Num_Transactions)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "steelblue", size = 3) +
+  labs(title = "Monthly Sales Transactions",
+       x = "Month",
+       y = "Number of Transactions") +
+  theme_minimal() +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "1 month") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot monthly revenue
+ggplot(monthly_sales, aes(x = YearMonth, y = Total_Revenue)) +
+  geom_line(color = "darkgreen", size = 1.2) +
+  geom_point(color = "darkgreen", size = 3) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Monthly Revenue",
+       x = "Month",
+       y = "Total Revenue (£)") +
+  theme_minimal() +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "1 month") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+
+# Normalize for dual axis
+monthly_sales <- monthly_sales |> 
+  mutate(
+    Revenue_Scaled = Total_Revenue / max(Total_Revenue) * max(Num_Transactions)
+  )
+
+ggplot(monthly_sales, aes(x = YearMonth)) +
+  # Revenue bars
+  geom_col(aes(y = Revenue_Scaled), fill = "lightgreen", alpha = 0.7) +
+  # Transaction line
+  geom_line(aes(y = Num_Transactions), color = "steelblue", size = 1.5) +
+  geom_point(aes(y = Num_Transactions), color = "steelblue", size = 3) +
+  labs(title = "Sales Transactions and Revenue Over Time",
+       subtitle = "Blue line: Transactions | Green bars: Revenue",
+       x = "Month",
+       y = "Number of Transactions") +
+  theme_minimal() +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "1 month") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Product Sales
+
+
+```{r}
+
+# Identify top-selling products by quantity
+top_products <- df |> 
+  group_by(StockCode, Description) |> 
+  summarise(
+    Total_Quantity_Sold = sum(Quantity, na.rm = TRUE),
+    Total_Revenue = sum(Revenue, na.rm = TRUE),
+    Num_Orders = n_distinct(Invoice),
+    .groups = 'drop'
+  ) |> 
+  filter(!is.na(Description), Total_Quantity_Sold > 0) |> 
+  arrange(desc(Total_Quantity_Sold)) |> 
+  head(10)
+
+print(top_products)
+
+# Select top 3-5 products for forecasting
+key_stockcodes <- top_products$StockCode[1:5]
+```
+
+```{r}
+# Monthly demand for top products
+monthly_demand <- df |> 
+  filter(StockCode %in% top_products$StockCode) |> 
+  mutate(Month = floor_date(InvoiceDate, "month")) |> 
+  group_by(StockCode, Description, Month) |> 
+  summarise(
+    Quantity_Sold = sum(Quantity, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+print(monthly_demand)
+```
+
+
+```{r}
+# Show the clear Christmas spike
+ggplot(monthly_demand, aes(x = Month, y = Quantity_Sold, color = Description)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Monthly Demand for Top 5 Products",
+       subtitle = "Clear seasonal spike before Christmas",
+       x = "Month",
+       y = "Quantity Sold") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+```{r}
+# simple forecast based on historical averages
+# Calculate average demand by month across all years
+seasonal_forecast <- df |> 
+  filter(StockCode %in% top_products$StockCode) |> 
+  mutate(Month_Number = month(InvoiceDate, label = TRUE)) |> 
+  group_by(StockCode, Description, Month_Number) |> 
+  summarise(
+    Avg_Monthly_Demand = round(mean(Quantity, na.rm = TRUE), 0),
+    Max_Monthly_Demand = max(Quantity, na.rm = TRUE),
+    .groups = 'drop'
+  ) |> 
+  arrange(StockCode, Month_Number)
+
+# View forecast
+print(seasonal_forecast)
+
+# Visualize monthly pattern
+ggplot(seasonal_forecast, aes(x = Month_Number, y = Avg_Monthly_Demand, 
+                               group = Description, color = Description)) +
+  geom_line(size = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Average Monthly Demand Pattern (Forecast Guide)",
+       subtitle = "Use this pattern to predict future months",
+       x = "Month",
+       y = "Average Quantity per Order") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# Identify peak months and recommended stock levels
+stock_recommendations <- seasonal_forecast |> 
+  group_by(StockCode, Description) |> 
+  summarise(
+    Peak_Month = Month_Number[which.max(Avg_Monthly_Demand)],
+    Peak_Demand = max(Avg_Monthly_Demand),
+    Off_Peak_Demand = min(Avg_Monthly_Demand),
+    Recommended_Peak_Stock = round(max(Avg_Monthly_Demand) * 1.5, 0),  # 50% buffer
+    .groups = 'drop'
+  )
+
+print(stock_recommendations)
+```
+
+
+
+
+# RFM Customer Segmentation
+
+## Important: rows with Customer ID need to be removed since we can't identify those
+
+```{r}
+# Save null customer ID rows to separate dataset
+null_customer_df <- df |> 
+  filter(is.na(`Customer ID`))
+
+# Remove from main dataset
+df <- df |> 
+  filter(!is.na(`Customer ID`))
+
+# Summary
+cat("Null customer rows:", nrow(null_customer_df), "\n")
+cat("Main dataset:", nrow(df), "\n")
+```
+
+
+
+```{r}
+
+# Define analysis date - day after the last transaction)
+analysis_date <- max(df$InvoiceDate, na.rm = TRUE) + 1
+
+# Create RFM dataset
+rfm_data <- df |> 
+  filter(!is.na(`Customer ID`)) |> # remove rows without Customer ID since we can't identify those customers
+  group_by(`Customer ID`) |> 
+  summarise(
+    
+    # Recency- Days since last purchase
+    Recency = as.numeric(analysis_date - max(InvoiceDate, na.rm = TRUE)),
+    
+    # Frequency- Number of unique invoices/purchases
+    Frequency = n_distinct(Invoice),
+    
+    # Monetary- Total revenue
+    Monetary = sum(Revenue, na.rm = TRUE),
+    
+    .groups = 'drop'
+  ) |> 
+  filter(Monetary > 0)  # remove customers with negative or zero monetary value
+
+head(rfm_data)
+summary(rfm_data)
+```
+
+## Analyze the distributions
+There are some outliers, Recency is skewed to the right, Frequency is only slightly right skewed, monetary is really just at 0 
+
+```{r}
+
+
+# histograms for each RFM component
+p1 <- ggplot(rfm_data, aes(x = Recency)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  labs(title = "Recency Distribution", x = "Days Since Last Purchase")
+
+p2 <- ggplot(rfm_data, aes(x = Frequency)) +
+  geom_histogram(bins = 30, fill = "darkgreen", alpha = 0.7) +
+  labs(title = "Frequency Distribution", x = "Number of Purchases")
+
+p3 <- ggplot(rfm_data, aes(x = Monetary)) +
+  geom_histogram(bins = 30, fill = "coral", alpha = 0.7) +
+  labs(title = "Monetary Distribution", x = "Total Revenue") +
+  scale_x_continuous(labels = scales::comma)
+
+grid.arrange(p1, p2, p3, ncol = 2)
+```
+
+## Standardize the data for clustering
+
+```{r}
+# create dataset for clustering
+rfm_for_clustering <- rfm_data |> 
+  select(Recency, Frequency, Monetary) |> 
+  mutate(
+    # Log transform Monetary to handle skew
+    Monetary_log = log1p(Monetary),
+    # Log transform Frequency for skew
+    Frequency_log = log1p(Frequency),
+    Recency_log = log1p(Recency)
+  ) |> 
+  select(Recency_log, Frequency_log, Monetary_log) |> 
+  scale() |>   # Standardize variables
+  as.data.frame()
+
+# Add Customer ID back
+rfm_for_clustering$CustomerID <- rfm_data$`Customer ID`
+```
+
+## Determine optimal number of clusters
+
+3 seems to be the most optimal
+```{r}
+
+# Prepare data for clustering (remove CustomerID)
+cluster_data <- rfm_for_clustering |> select(-CustomerID)
+
+# Calculate within-cluster sum of squares for different k values
+wss <- numeric(10)
+
+for (k in 1:10) {
+  kmeans_temp <- kmeans(cluster_data, centers = k, nstart = 25)
+  wss[k] <- kmeans_temp$tot.withinss
+}
+
+# Plot the elbow curve
+plot(1:10, wss, type = "b", 
+     xlab = "Number of Clusters (k)", 
+     ylab = "Within-Cluster Sum of Squares",
+     main = "Elbow Method for Optimal k",
+     pch = 19, col = "blue")
+grid()
+
+
+# Silhouette method
+silhouette_scores <- numeric(9)
+
+for (k in 2:10) {
+  kmeans_temp <- kmeans(cluster_data, centers = k, nstart = 25)
+  sil <- silhouette(kmeans_temp$cluster, dist(cluster_data))
+  silhouette_scores[k-1] <- mean(sil[, 3])
+}
+
+# Plot silhouette scores
+plot(2:10, silhouette_scores, type = "b",
+     xlab = "Number of Clusters (k)",
+     ylab = "Average Silhouette Score",
+     main = "Silhouette Method for Optimal k",
+     pch = 19, col = "darkgreen")
+grid()
+```
+# K means clustering
+
+```{r}
+set.seed(123)  
+k_optimal <- 3
+
+kmeans_result <- kmeans(cluster_data, centers = k_optimal, nstart = 25)
+
+# Add cluster assignments back to original data
+rfm_data$Cluster <- as.factor(kmeans_result$cluster)
+```
+
+
+```{r}
+# analyze and interpret
+# Summarize clusters
+# Step 6: Analyze and Interpret Clusters (Updated with Wholesale naming)
+
+# Summarize clusters
+cluster_summary <- rfm_data |> 
+  group_by(Cluster) |> 
+  summarise(
+    Count = n(),
+    Avg_Recency = round(mean(Recency), 1),
+    Avg_Frequency = round(mean(Frequency), 1),
+    Avg_Monetary = round(mean(Monetary), 0),
+    .groups = 'drop'
+  ) |> 
+  arrange(Cluster)
+
+print(cluster_summary)
+
+
+cluster_summary <- cluster_summary |> 
+  mutate(
+    Segment = case_when(
+      # Wholesale- high frequency and high monetary value
+      Avg_Frequency >= 8 & Avg_Monetary >= 4000 ~ "Wholesale",
+      
+      # High-Value- Recent, decent frequency, good monetary
+      Avg_Recency < 100 & Avg_Frequency >= 3 & Avg_Monetary >= 1000 ~ "High-Value",
+      
+      # Casual- Everything else
+      TRUE ~ "Casual"
+    )
+  )
+
+print(cluster_summary)
+
+# revenue contribution by segment
+segment_analysis <- cluster_summary |> 
+  mutate(
+    Total_Revenue = Count * Avg_Monetary,
+    Revenue_Percent = round(Total_Revenue / sum(Total_Revenue) * 100, 1),
+    Customer_Percent = round(Count / sum(Count) * 100, 1)
+  ) |> 
+  select(Segment, Cluster, Count, Customer_Percent, Avg_Monetary, Total_Revenue, Revenue_Percent)
+
+print(segment_analysis)
+```
+
+## Visualize segments
+Casual and high value seem to have a bit of overlap due to their monetary values being more similar and frequency is not that far apart
+
+```{r}
+library(plotly)
+
+# 3D scatter plot
+plot_ly(rfm_data, 
+        x = ~Recency, y = ~Frequency, z = ~Monetary,
+        color = ~Cluster,
+        type = "scatter3d",
+        mode = "markers") |> 
+  layout(title = "Customer Segments in RFM Space")
+
+# 2D plots
+p1 <- ggplot(rfm_data, aes(x = Recency, y = Monetary, color = Cluster)) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Recency vs Monetary by Cluster") +
+  scale_y_continuous(labels = scales::comma)
+
+p2 <- ggplot(rfm_data, aes(x = Frequency, y = Monetary, color = Cluster)) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Frequency vs Monetary by Cluster") +
+  scale_y_continuous(labels = scales::comma)
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+
+# Top revenue generating customers
+
+```{r}
+# Find top revenue-generating customers
+top_customers <- rfm_data |> 
+  arrange(desc(Monetary)) |> 
+  head(20) |>   # Top 20 
+  select(`Customer ID`, Recency, Frequency, Monetary, Cluster)
+
+print(top_customers)
+
+# Calculate what % of revenue they represent
+top_10_revenue <- rfm_data |> 
+  arrange(desc(Monetary)) |> 
+  head(10) |> 
+  summarise(
+    Top10_Revenue = sum(Monetary),
+    Total_Revenue = sum(rfm_data$Monetary),
+    Percentage = round(Top10_Revenue / Total_Revenue * 100, 1)
+  )
+
+print(top_10_revenue)
+```
+
+
+
+
+
+
